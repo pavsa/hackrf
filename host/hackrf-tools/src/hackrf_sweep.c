@@ -20,7 +20,7 @@
  * the Free Software Foundation, Inc., 51 Franklin Street,
  * Boston, MA 02110-1301, USA.
  */
-
+#define HACKRF_SWEEP_AS_LIBRARY
 #include <hackrf.h>
 
 #include <stdio.h>
@@ -35,6 +35,11 @@
 #include <errno.h>
 #include <fftw3.h>
 #include <inttypes.h>
+
+#ifdef HACKRF_SWEEP_AS_LIBRARY
+#include <libusb.h>
+#include "hackrf_sweep.h"
+#endif
 
 #define _FILE_OFFSET_BITS 64
 
@@ -105,10 +110,10 @@ int gettimeofday(struct timeval *tv, void* ignored) {
 	#define sleep(a) Sleep( (a*1000) )
 #endif
 
-uint32_t num_samples = SAMPLES_PER_BLOCK;
-int num_ranges = 0;
-uint16_t frequencies[MAX_SWEEP_RANGES*2];
-int step_count;
+static uint32_t num_samples = SAMPLES_PER_BLOCK;
+static int num_ranges = 0;
+static uint16_t frequencies[MAX_SWEEP_RANGES*2];
+static int step_count;
 
 static float TimevalDiff(const struct timeval *a, const struct timeval *b) {
    return (a->tv_sec - b->tv_sec) + 1e-6f * (a->tv_usec - b->tv_usec);
@@ -160,38 +165,46 @@ int parse_u32_range(char* s, uint32_t* const value_min, uint32_t* const value_ma
 	return HACKRF_SUCCESS;
 }
 
-volatile bool do_exit = false;
+static volatile bool do_exit = false;
 
-FILE* fd = NULL;
-volatile uint32_t byte_count = 0;
-volatile uint64_t sweep_count = 0;
+static FILE* fd = NULL;
+static volatile uint32_t byte_count = 0;
+static volatile uint64_t sweep_count = 0;
 
-struct timeval time_start;
-struct timeval t_start;
-struct timeval time_stamp;
+static struct timeval time_start;
+static struct timeval t_start;
+static struct timeval time_stamp;
 
-bool amp = false;
-uint32_t amp_enable;
+static bool amp = false;
+static uint32_t amp_enable;
 
-bool antenna = false;
-uint32_t antenna_enable;
+static bool antenna = false;
+static uint32_t antenna_enable;
 
-bool binary_output = false;
-bool ifft_output = false;
-bool one_shot = false;
-volatile bool sweep_started = false;
+static bool binary_output = false;
+static bool ifft_output = false;
+static bool one_shot = false;
+static volatile bool sweep_started = false;
 
-int fftSize = 20;
-double fft_bin_width;
-fftwf_complex *fftwIn = NULL;
-fftwf_complex *fftwOut = NULL;
-fftwf_plan fftwPlan = NULL;
-fftwf_complex *ifftwIn = NULL;
-fftwf_complex *ifftwOut = NULL;
-fftwf_plan ifftwPlan = NULL;
-uint32_t ifft_idx = 0;
-float* pwr;
-float* window;
+static int fftSize = 20;
+static double fft_bin_width;
+static fftwf_complex *fftwIn = NULL;
+static fftwf_complex *fftwOut = NULL;
+static fftwf_plan fftwPlan = NULL;
+static fftwf_complex *ifftwIn = NULL;
+static fftwf_complex *ifftwOut = NULL;
+static fftwf_plan ifftwPlan = NULL;
+static uint32_t ifft_idx = 0;
+static float* pwr;
+static float* window;
+
+#ifdef HACKRF_SWEEP_AS_LIBRARY
+static void (*fft_power_callback)(char /*full_sweep_done*/, int /*bins*/, double* /*freqStart*/, float /*fft_bin_Hz*/, float* /*powerdBm*/);
+static double *binsFreqStart	= NULL;
+static float *binsPowerdBm = NULL;
+static int binsMaxEntries	= 0;
+#endif
+
 
 float logPower(fftwf_complex in, float scale)
 {
@@ -212,6 +225,12 @@ int rx_callback(hackrf_transfer* transfer) {
 	char time_str[50];
 	struct timeval usb_transfer_time;
 
+#ifdef HACKRF_SWEEP_AS_LIBRARY
+	int binsLength	= 0;
+	bool fullSweepDone	= false;
+#endif
+	bool stopProcessing = false;
+
 	if(NULL == fd) {
 		return -1;
 	}
@@ -231,6 +250,9 @@ int rx_callback(hackrf_transfer* transfer) {
 			continue;
 		}
 		if (frequency == (uint64_t)(FREQ_ONE_MHZ*frequencies[0])) {
+#ifdef HACKRF_SWEEP_AS_LIBRARY
+			fullSweepDone	= true;
+#endif
 			if(sweep_started) {
 				if(ifft_output) {
 					fftwf_execute(ifftwPlan);
@@ -282,6 +304,34 @@ int rx_callback(hackrf_transfer* transfer) {
 			record_length = 2 * sizeof(band_edge)
 					+ (fftSize/4) * sizeof(float);
 
+#ifdef HACKRF_SWEEP_AS_LIBRARY
+			if (!stopProcessing){
+				for (i = 0; i < fftSize/4; ++i) {
+					if(binsLength >= binsMaxEntries)
+					{
+						fprintf(stderr, "binsLength %d > binsMaxEntries %d\n", binsLength, binsMaxEntries);
+						stopProcessing	= true;
+						break;
+					}
+					binsFreqStart[binsLength]	= frequency + i*(double)fft_bin_width;
+					binsPowerdBm[binsLength]	= pwr[1+(fftSize*5)/8 + i];
+					binsLength++;
+				}
+			}
+			if (!stopProcessing){
+				for (i = 0; i < fftSize/4; ++i) {
+					if(binsLength >= binsMaxEntries)
+					{
+						fprintf(stderr, "binsLength %d > binsMaxEntries %d\n", binsLength, binsMaxEntries);
+						stopProcessing	= true;
+						break;
+					}
+					binsFreqStart[binsLength]	= frequency + DEFAULT_SAMPLE_RATE_HZ / 2 + i*(double)fft_bin_width;
+					binsPowerdBm[binsLength]	= pwr[1 + fftSize/8 + i];
+					binsLength++;
+				}
+			}
+#else
 			fwrite(&record_length, sizeof(record_length), 1, fd);
 			band_edge = frequency;
 			fwrite(&band_edge, sizeof(band_edge), 1, fd);
@@ -295,6 +345,7 @@ int rx_callback(hackrf_transfer* transfer) {
 			band_edge = frequency + (DEFAULT_SAMPLE_RATE_HZ * 3) / 4;
 			fwrite(&band_edge, sizeof(band_edge), 1, fd);
 			fwrite(&pwr[1+fftSize/8], sizeof(float), fftSize/4, fd);
+#endif
 		} else if(ifft_output) {
 			ifft_idx = round((frequency - (uint64_t)(FREQ_ONE_MHZ*frequencies[0]))
 					/ fft_bin_width);
@@ -336,6 +387,13 @@ int rx_callback(hackrf_transfer* transfer) {
 			fprintf(fd, "\n");
 		}
 	}
+
+#ifdef HACKRF_SWEEP_AS_LIBRARY
+	if (binsLength > 0)
+	{
+		fft_power_callback(fullSweepDone, binsLength, binsFreqStart, fft_bin_width, binsPowerdBm);
+	}
+#endif
 	return 0;
 }
 
@@ -378,7 +436,23 @@ void sigint_callback_handler(int signum)  {
 }
 #endif
 
+
+#ifdef HACKRF_SWEEP_AS_LIBRARY
+
+void hackrf_sweep_lib_stop(){
+	do_exit = true;
+}
+
+
+/**
+ * for parameters, enter 0 for default values
+ */
+int hackrf_sweep_lib_start( void (*_fft_power_callback)(char /*full_sweep_done*/,  int /*bins*/, double* /*freqStart*/,  float /*fft_bin_Hz*/, float* /*powerdBm*/),
+		uint32_t freq_min, uint32_t freq_max, uint32_t _fft_bin_width, uint32_t num_samples, unsigned int lna_gain, unsigned int vga_gain) {
+#else
 int main(int argc, char** argv) {
+#endif
+
 	int opt, i, result = 0;
 	const char* path = NULL;
 	const char* serial_number = NULL;
@@ -386,12 +460,57 @@ int main(int argc, char** argv) {
 	struct timeval time_now;
 	float time_diff;
 	float sweep_rate;
+
+#ifndef HACKRF_SWEEP_AS_LIBRARY
 	unsigned int lna_gain=16, vga_gain=20;
 	uint32_t freq_min = 0;
 	uint32_t freq_max = 6000;
+#endif
 	uint32_t requested_fft_bin_width;
 
 
+#ifdef HACKRF_SWEEP_AS_LIBRARY
+	do_exit	= false;
+	setbuf(stderr, NULL);
+	int step_count;
+	binary_output	= true;
+	fft_bin_width	= _fft_bin_width;
+	num_ranges	= 0;
+
+	if(freq_min >= freq_max) {
+		fprintf(stderr,
+				"argument error: freq_max must be greater than freq_min.\n");
+		return EXIT_FAILURE;
+	}
+	if(FREQ_MAX_MHZ <freq_max) {
+		fprintf(stderr,
+				"argument error: freq_max may not be higher than %u.\n",
+				FREQ_MAX_MHZ);
+		return EXIT_FAILURE;
+	}
+	if(MAX_SWEEP_RANGES <= num_ranges) {
+		fprintf(stderr,
+				"argument error: specify a maximum of %u frequency ranges.\n",
+				MAX_SWEEP_RANGES);
+		return EXIT_FAILURE;
+	}
+	frequencies[2*num_ranges] = (uint16_t)freq_min;
+	frequencies[2*num_ranges+1] = (uint16_t)freq_max;
+	num_ranges++;
+
+	num_samples	= num_samples == 0 ? SAMPLES_PER_BLOCK : num_samples;
+	fftSize = DEFAULT_SAMPLE_RATE_HZ / fft_bin_width;
+
+	if (_fft_power_callback == NULL)
+	{
+		fprintf(stderr,
+				"argument error: callback function pointer NULL\n",
+				MAX_SWEEP_RANGES);
+		return EXIT_FAILURE;
+	}
+	fft_power_callback	= _fft_power_callback;
+
+#else
 	while( (opt = getopt(argc, argv, "a:f:p:l:g:d:n:w:1BIr:h?")) != EOF ) {
 		result = HACKRF_SUCCESS;
 		switch( opt ) 
@@ -487,6 +606,7 @@ int main(int argc, char** argv) {
 			return EXIT_FAILURE;
 		}		
 	}
+#endif
 
 	if (lna_gain % 8)
 		fprintf(stderr, "warning: lna_gain (-l) must be a multiple of 8\n");
@@ -565,6 +685,50 @@ int main(int argc, char** argv) {
 	for (i = 0; i < fftSize; i++) {
 		window[i] = 0.5f * (1.0f - cos(2 * M_PI * i / (fftSize - 1)));
 	}
+//#define HACKRF_SWEEP_AS_LIBRARY
+#ifdef HACKRF_SWEEP_AS_LIBRARY
+	binsMaxEntries	= fftSize/4 * 2 * BLOCKS_PER_TRANSFER;
+	binsFreqStart	= malloc(sizeof(*binsFreqStart)*binsMaxEntries);
+	binsPowerdBm = malloc(sizeof(*binsPowerdBm)*binsMaxEntries);
+	if (!binsFreqStart || !binsPowerdBm){
+		if (binsFreqStart)
+			free(binsFreqStart);
+		if (binsPowerdBm)
+			free(binsPowerdBm);
+
+		fprintf(stderr,
+				"cannot allocate memory\n");
+		return EXIT_FAILURE;
+	}
+
+	if(1)
+	{
+		//Reset device before using it to prevent stuck hardware
+		if (libusb_init(NULL) != 0){
+			fprintf(stderr,
+					"cannot init libusb\n");
+			return EXIT_FAILURE;
+		}
+		uint16_t hackrf_usb_vid = 0x1d50;
+		uint16_t hackrf_one_usb_pid = 0x6089;
+		struct libusb_device_handle *usb_device = libusb_open_device_with_vid_pid(NULL, hackrf_usb_vid, hackrf_one_usb_pid);
+		if (usb_device)
+		{
+			libusb_reset_device(usb_device);
+			libusb_close(usb_device);
+
+			int timeout	= 100;
+			while (timeout-- >0 ){
+				usb_device = libusb_open_device_with_vid_pid(NULL, hackrf_usb_vid, hackrf_one_usb_pid);
+				if (usb_device != NULL){
+					libusb_close(usb_device);
+					break;
+				}
+				usleep(10000);
+			}
+		}
+	}
+#endif
 
 	result = hackrf_init();
 	if( result != HACKRF_SUCCESS ) {
@@ -598,6 +762,8 @@ int main(int argc, char** argv) {
 		return EXIT_FAILURE;
 	}
 
+#ifndef HACKRF_SWEEP_AS_LIBRARY
+
 #ifdef _MSC_VER
 	SetConsoleCtrlHandler( (PHANDLER_ROUTINE) sighandler, TRUE );
 #else
@@ -608,6 +774,8 @@ int main(int argc, char** argv) {
 	signal(SIGTERM, &sigint_callback_handler);
 	signal(SIGABRT, &sigint_callback_handler);
 #endif
+#endif
+
 	fprintf(stderr, "call hackrf_sample_rate_set(%.03f MHz)\n",
 		   ((float)DEFAULT_SAMPLE_RATE_HZ/(float)FREQ_ONE_MHZ));
 	result = hackrf_set_sample_rate_manual(device, DEFAULT_SAMPLE_RATE_HZ, 1);
@@ -690,9 +858,20 @@ int main(int argc, char** argv) {
 	gettimeofday(&t_start, NULL);
 
 	fprintf(stderr, "Stop with Ctrl-C\n");
+	sweep_count	= 0;
 	while((hackrf_is_streaming(device) == HACKRF_TRUE) && (do_exit == false)) {
 		float time_difference;
+#ifndef  HACKRF_SWEEP_AS_LIBRARY
 		sleep(1);
+#else
+		//allows fast shutdown
+		int limit	= 20*10;
+		while(do_exit == false && limit-- > 0){
+			usleep(10000);
+		}
+		if(do_exit)
+			break;
+#endif
 		
 		gettimeofday(&time_now, NULL);
 		
@@ -744,7 +923,9 @@ int main(int argc, char** argv) {
 	}
 
 	if(fd != NULL) {
+#ifndef  HACKRF_SWEEP_AS_LIBRARY
 		fclose(fd);
+#endif
 		fd = NULL;
 		fprintf(stderr, "fclose(fd) done\n");
 	}
@@ -754,6 +935,14 @@ int main(int argc, char** argv) {
 	fftwf_free(window);
 	fftwf_free(ifftwIn);
 	fftwf_free(ifftwOut);
+
+#ifdef  HACKRF_SWEEP_AS_LIBRARY
+	if (binsFreqStart)
+		free(binsFreqStart);
+	if (binsPowerdBm)
+		free(binsPowerdBm);
+#endif
+
 	fprintf(stderr, "exit\n");
 	return exit_code;
 }

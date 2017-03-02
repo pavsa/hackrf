@@ -1,3 +1,8 @@
+Modified hackrf_sweep to support building it as a library for use in [HackRF Spectrum analyzer](https://github.com/pavsa/hackrf-spectrum-analyzer)
+
+
+ 
+
 This repository contains hardware designs and software for HackRF,
 a low cost, open source Software Defined Radio platform.
 
