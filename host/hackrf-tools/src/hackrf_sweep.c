@@ -252,6 +252,10 @@ int rx_callback(hackrf_transfer* transfer) {
 		if (frequency == (uint64_t)(FREQ_ONE_MHZ*frequencies[0])) {
 #ifdef HACKRF_SWEEP_AS_LIBRARY
 			fullSweepDone	= true;
+			//flush previous data so that it can be displayed
+			fft_power_callback(fullSweepDone, binsLength, binsFreqStart, fft_bin_width, binsPowerdBm);
+			binsLength	= 0;
+			fullSweepDone	= false;
 #endif
 			if(sweep_started) {
 				if(ifft_output) {
@@ -301,9 +305,6 @@ int rx_callback(hackrf_transfer* transfer) {
 			pwr[i] = logPower(fftwOut[i], 1.0f / fftSize);
 		}
 		if(binary_output) {
-			record_length = 2 * sizeof(band_edge)
-					+ (fftSize/4) * sizeof(float);
-
 #ifdef HACKRF_SWEEP_AS_LIBRARY
 			if (!stopProcessing){
 				for (i = 0; i < fftSize/4; ++i) {
@@ -332,6 +333,9 @@ int rx_callback(hackrf_transfer* transfer) {
 				}
 			}
 #else
+			record_length = 2 * sizeof(band_edge)
+					+ (fftSize/4) * sizeof(float);
+
 			fwrite(&record_length, sizeof(record_length), 1, fd);
 			band_edge = frequency;
 			fwrite(&band_edge, sizeof(band_edge), 1, fd);
