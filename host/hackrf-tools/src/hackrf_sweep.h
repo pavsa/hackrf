@@ -30,7 +30,7 @@
  * only ONE instance running is supported at any time
  */
 ADDAPI int hackrf_sweep_lib_start( void (*_fft_power_callback)(char full_sweep_done, int bins, double* freqStart,  float fft_bin_Hz, float* powerdBm),
-		uint32_t freq_min, uint32_t freq_max, uint32_t fft_bin_width, uint32_t num_samples, unsigned int lna_gain, unsigned int vga_gain);
+		uint32_t freq_min, uint32_t freq_max, uint32_t fft_bin_width, uint32_t num_samples, unsigned int lna_gain, unsigned int vga_gain, unsigned int _antennaPowerEnable);
 ADDAPI void hackrf_sweep_lib_stop();
 
 #endif /* HACKRF_SWEEP_H_ */

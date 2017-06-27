@@ -452,7 +452,7 @@ void hackrf_sweep_lib_stop(){
  * for parameters, enter 0 for default values
  */
 int hackrf_sweep_lib_start( void (*_fft_power_callback)(char /*full_sweep_done*/,  int /*bins*/, double* /*freqStart*/,  float /*fft_bin_Hz*/, float* /*powerdBm*/),
-		uint32_t freq_min, uint32_t freq_max, uint32_t _fft_bin_width, uint32_t num_samples, unsigned int lna_gain, unsigned int vga_gain) {
+		uint32_t freq_min, uint32_t freq_max, uint32_t _fft_bin_width, uint32_t num_samples, unsigned int lna_gain, unsigned int vga_gain, unsigned int _antennaPowerEnable) {
 #else
 int main(int argc, char** argv) {
 #endif
@@ -513,6 +513,9 @@ int main(int argc, char** argv) {
 		return EXIT_FAILURE;
 	}
 	fft_power_callback	= _fft_power_callback;
+
+	antenna	= true;
+	antenna_enable	= _antennaPowerEnable;
 
 #else
 	while( (opt = getopt(argc, argv, "a:f:p:l:g:d:n:w:1BIr:h?")) != EOF ) {
